@@ -5,7 +5,7 @@ from email.mime.text import MIMEText
 import requests
 import streamlit as st
 
-GEMINI_MODEL = "gemini-3-flash-preview"
+GEMINI_MODELS = ("gemini-3-flash-preview", "gemini-2.5-flash")
 
 SYSTEM_PROMPT = """You are an AI Mental Health Assessment Report Generator.
 
@@ -304,17 +304,24 @@ def build_summary(score: int, category: str) -> str:
 
 
 def generate_report(summary: str) -> str:
-    response = requests.post(
-        f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent",
-        params={"key": get_secret("GEMINI_API_KEY")},
-        json={
-            "system_instruction": {"parts": [{"text": SYSTEM_PROMPT}]},
-            "contents": [{"role": "user", "parts": [{"text": summary}]}],
-        },
-        timeout=60,
-    )
-    response.raise_for_status()
-    return response.json()["candidates"][0]["content"]["parts"][0]["text"]
+    last_error = None
+    for model in GEMINI_MODELS:
+        for _ in range(2):
+            try:
+                response = requests.post(
+                    f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent",
+                    params={"key": get_secret("GEMINI_API_KEY")},
+                    json={
+                        "system_instruction": {"parts": [{"text": SYSTEM_PROMPT}]},
+                        "contents": [{"role": "user", "parts": [{"text": summary}]}],
+                    },
+                    timeout=180,
+                )
+                response.raise_for_status()
+                return response.json()["candidates"][0]["content"]["parts"][0]["text"]
+            except (requests.exceptions.RequestException, KeyError, IndexError) as exc:
+                last_error = exc
+    raise RuntimeError("All Gemini models failed") from last_error
 
 
 def send_report_email(recipient: str, report: str) -> None:
@@ -345,7 +352,7 @@ if submitted:
             with st.spinner("Analyzing your responses..."):
                 try:
                     report = generate_report(summary)
-                except (requests.exceptions.RequestException, KeyError, IndexError):
+                except RuntimeError:
                     st.error("Could not generate your report right now. Please try again later.")
 
             if report:
