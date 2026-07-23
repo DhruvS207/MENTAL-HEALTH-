@@ -1,13 +1,148 @@
-import json
-from datetime import datetime, timezone
+import smtplib
+from datetime import datetime
+from email.mime.text import MIMEText
 
 import requests
 import streamlit as st
 
-try:
-    WEBHOOK_URL = st.secrets["WEBHOOK_URL"]
-except (KeyError, FileNotFoundError):
-    WEBHOOK_URL = "http://localhost:5678/webhook/a1bc4ec1-5434-4740-a439-2c91919b865e"
+GEMINI_MODEL = "gemini-3-flash-preview"
+
+SYSTEM_PROMPT = """You are an AI Mental Health Assessment Report Generator.
+
+Your role is to analyze a user's responses to a structured mental health questionnaire and generate a clear, objective, and supportive report. You are NOT a licensed mental health professional and must never diagnose medical or psychiatric conditions. Your purpose is to summarize questionnaire results, identify patterns, and provide educational insights.
+
+Guidelines:
+
+1. Analyze all responses together rather than interpreting individual answers in isolation.
+
+2. Identify possible patterns in the following areas when supported by the responses:
+   - Stress
+   - Anxiety-related symptoms
+   - Mood
+   - Depression-related symptoms
+   - Sleep quality
+   - Emotional regulation
+   - Self-esteem
+   - Social relationships
+   - Burnout
+   - Work or academic pressure
+   - Lifestyle factors affecting mental well-being
+
+3. Use evidence-based language such as:
+   - "The responses suggest..."
+   - "The questionnaire indicates..."
+   - "There may be signs of..."
+   - "The responses are consistent with..."
+   Never state or imply a definitive diagnosis.
+
+4. Assign a qualitative severity level for each relevant domain:
+   - Minimal
+   - Mild
+   - Moderate
+   - Elevated
+   - High
+
+5. Highlight strengths and protective factors when present, including:
+   - Healthy coping strategies
+   - Good social support
+   - Positive routines
+   - Resilience
+   - Motivation to improve
+   - Healthy sleep or exercise habits
+
+6. Identify areas that may benefit from attention.
+
+7. Provide practical, evidence-based recommendations, such as:
+   - Sleep hygiene
+   - Physical activity
+   - Mindfulness
+   - Stress management
+   - Journaling
+   - Time management
+   - Social connection
+   - Professional counseling if appropriate
+
+8. If responses indicate possible risk of self-harm, suicidal thoughts, or severe psychological distress:
+   - Clearly state that the responses indicate a potentially urgent concern.
+   - Strongly encourage immediate contact with a licensed mental health professional or local emergency services.
+   - Do not attempt to provide therapy.
+   - Maintain a calm, supportive, non-judgmental tone.
+
+9. Never:
+   - Diagnose disorders.
+   - Prescribe medications.
+   - Claim certainty.
+   - Shame or criticize the user.
+
+10. Write in a compassionate, professional, and easy-to-understand style.
+
+Generate the report using the following structure:
+
+# Mental Health Assessment Report
+
+## Assessment Summary
+A concise overview of the overall findings.
+
+## Overall Well-being
+Overall assessment of emotional well-being.
+
+## Domain Analysis
+
+For each applicable domain include:
+- Severity Level
+- Observations
+- Supporting evidence from questionnaire responses
+- Potential impact
+
+## Strengths and Protective Factors
+
+List positive findings.
+
+## Areas for Improvement
+
+Summarize the primary concerns.
+
+## Personalized Recommendations
+
+Provide actionable recommendations organized by:
+- Daily habits
+- Stress management
+- Sleep
+- Physical health
+- Social well-being
+- Professional support (if appropriate)
+
+## Overall Risk Level
+
+One of:
+- Low
+- Mild
+- Moderate
+- Elevated
+- High
+
+Provide a brief explanation.
+
+## Important Disclaimer
+
+Include the following disclaimer:
+
+"This report is generated from questionnaire responses and is intended for informational and educational purposes only. It is not a medical diagnosis and should not replace an evaluation by a qualified mental health professional. If you are experiencing severe distress, thoughts of self-harm, or feel unsafe, seek immediate help from a licensed mental health professional or your local emergency services."
+
+Formatting requirements:
+- Use clear headings.
+- Write in Markdown.
+- Keep the report between 700 and 1,200 words.
+- Use bullet points where appropriate.
+- Avoid technical jargon whenever possible.
+- Ensure the report is suitable for inclusion directly in the body of an email."""
+
+
+def get_secret(name: str):
+    try:
+        return st.secrets[name]
+    except (KeyError, FileNotFoundError):
+        return None
 
 st.set_page_config(page_title="Mental Health Check-In", page_icon="🧠", layout="centered")
 
@@ -168,51 +303,58 @@ def build_summary(score: int, category: str) -> str:
     return " ".join(parts)
 
 
+def generate_report(summary: str) -> str:
+    response = requests.post(
+        f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent",
+        params={"key": get_secret("GEMINI_API_KEY")},
+        json={
+            "system_instruction": {"parts": [{"text": SYSTEM_PROMPT}]},
+            "contents": [{"role": "user", "parts": [{"text": summary}]}],
+        },
+        timeout=60,
+    )
+    response.raise_for_status()
+    return response.json()["candidates"][0]["content"]["parts"][0]["text"]
+
+
+def send_report_email(recipient: str, report: str) -> None:
+    sender = get_secret("GMAIL_ADDRESS")
+    msg = MIMEText(report, "plain", "utf-8")
+    msg["Subject"] = "MENTAL HEALTH REPORT"
+    msg["From"] = sender
+    msg["To"] = recipient
+    with smtplib.SMTP_SSL("smtp.gmail.com", 465, timeout=30) as server:
+        server.login(sender, get_secret("GMAIL_APP_PASSWORD"))
+        server.send_message(msg)
+
+
 if submitted:
     if not name.strip() or not email.strip():
         st.error("Please enter your name and email before submitting.")
     elif "@" not in email or "." not in email:
         st.error("Please enter a valid email address.")
     else:
-        score, category = compute_score()
-        summary = build_summary(score, category)
+        missing = [k for k in ("GEMINI_API_KEY", "GMAIL_ADDRESS", "GMAIL_APP_PASSWORD") if not get_secret(k)]
+        if missing:
+            st.error(f"The app is not fully configured yet — missing secrets: {', '.join(missing)}.")
+        else:
+            score, category = compute_score()
+            summary = build_summary(score, category)
 
-        payload = {
-            "name": name.strip(),
-            "email": email.strip(),
-            "age_group": age_group,
-            "occupation": occupation,
-            "mood": mood,
-            "anxiety_frequency": anxiety_frequency,
-            "stress_level": stress_level,
-            "happiness_rating": happiness_rating,
-            "sleep_hours": sleep_hours,
-            "sleep_quality": sleep_quality,
-            "energy_level": energy_level,
-            "social_connection": social_connection,
-            "physical_activity": physical_activity,
-            "appetite": appetite,
-            "concentration": concentration,
-            "overwhelmed_frequency": overwhelmed_frequency,
-            "coping": coping,
-            "support_available": support_available,
-            "additional_notes": additional_notes.strip(),
-            "wellbeing_score": score,
-            "wellbeing_category": category,
-            "summary": summary,
-            "submitted_at": datetime.now(timezone.utc).isoformat(),
-        }
+            report = None
+            with st.spinner("Analyzing your responses..."):
+                try:
+                    report = generate_report(summary)
+                except (requests.exceptions.RequestException, KeyError, IndexError):
+                    st.error("Could not generate your report right now. Please try again later.")
 
-        try:
-            response = requests.post(
-                WEBHOOK_URL,
-                data=json.dumps(payload),
-                headers={"Content-Type": "application/json"},
-                timeout=15,
-            )
-            if response.ok:
-                st.success(f"✅ Thank you, {name}! Your check-in has been submitted. A summary email will be delivered to {email}.")
-            else:
-                st.error("Something went wrong while submitting. Please try again later.")
-        except requests.exceptions.RequestException:
-            st.error("Could not submit your check-in right now. Please try again later.")
+            if report:
+                try:
+                    send_report_email(email.strip(), report)
+                    email_note = f"A copy has been emailed to {email}."
+                except (smtplib.SMTPException, OSError):
+                    email_note = "The email copy could not be sent, but your full report is below."
+
+                st.success(f"✅ Thank you, {name}! Your check-in has been analyzed. {email_note}")
+                st.divider()
+                st.markdown(report)
